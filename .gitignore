@@ -1,0 +1,27 @@
+# Sensitive / local state
+.env
+.env.*
+state.db
+state.json
+state.json.migrated
+
+# Logs (ephemeral — don't commit)
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+.zshrc

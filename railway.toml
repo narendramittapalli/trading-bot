@@ -1,0 +1,19 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python main.py run"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 5
+
+# ─── Persistent Volume ───────────────────────────────────────────────────────
+# SQLite state and logs must survive redeploys.
+#
+# In the Railway dashboard:
+#   1. Go to your service → Settings → Volumes
+#   2. Add a volume, mount path: /data
+#   3. Add environment variable: DATA_DIR=/data
+#
+# That's it. The bot will store state.db and logs/ in /data automatically.
+# ─────────────────────────────────────────────────────────────────────────────

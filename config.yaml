@@ -1,0 +1,110 @@
+alpaca:
+  mode: paper
+
+# ─── Asset universe ───────────────────────────────────────────────────────────
+# Instruments are ranked by 20-day momentum every market day.
+# Claude then selects the best picks within each class.
+# top_n: how many instruments per class to hold simultaneously.
+
+universe:
+  us_equities:
+    # Broad ETFs + high-momentum large-cap stocks
+    instruments: [SPY, QQQ, IWM, VTI, ARKK, XLK, XLE, XLF,
+                  AAPL, MSFT, NVDA, META, GOOGL, AMZN, TSLA, AVGO, JPM, UNH]
+    max_allocation: 0.45
+    top_n: 3
+
+  crypto:
+    instruments: [BTCUSD, ETHUSD, SOLUSD]
+    max_allocation: 0.08      # Reduced from 0.15 — crypto volatility destroys capital
+    top_n: 1
+
+  commodities:
+    instruments: [GLD, SLV, USO, PDBC]
+    max_allocation: 0.25
+    top_n: 1
+
+  international:
+    instruments: [EFA, EEM, EWJ, EWA, INDA]
+    max_allocation: 0.25
+    top_n: 1
+
+# ─── Global settings ─────────────────────────────────────────────────────────
+
+global:
+  max_single_instrument: 0.20   # Reduced from 0.25 — tighter concentration limit
+  cash_threshold: 0.0
+  capital: 500                  # Updated by 'python main.py deposit <amount>'
+  lookback_days: 20             # Momentum lookback window
+  rebalance_time: "09:35"       # Time to run the daily adaptive check (ET)
+  timezone: America/New_York
+
+  # Minimum average momentum a class must have to receive ANY capital.
+  # Classes below this threshold are forced SKIP regardless of Claude's decision.
+  # 1.5% over 20 days = meaningful positive trend, not just noise.
+  min_class_momentum_pct: 1.5
+
+  # Market regime filter — uses SPY as a market health indicator.
+  # If SPY 20-day momentum drops below this, all ACTIVE classes become REDUCE.
+  # If SPY drops below 2x this threshold, all classes are forced SKIP (full cash).
+  market_regime_threshold_pct: -2.0
+
+  # Symbol used as market regime proxy
+  market_regime_symbol: SPY
+
+# ─── Adaptive scheduling ─────────────────────────────────────────────────────
+# Controls when the daily check decides to actually rebalance vs skip.
+
+adaptive:
+  # Only rebalance if a momentum score shifts by more than this (as a decimal)
+  # 0.03 = 3% momentum move triggers a rebalance consideration
+  momentum_shift_threshold: 0.03
+
+  # Drawdown circuit breaker: hold all cash if portfolio falls this far
+  # below its all-time peak (as a percentage).
+  max_drawdown_pct: 10.0
+
+# ─── News ────────────────────────────────────────────────────────────────────
+
+news:
+  lookback_hours: 48
+  sources: [newsapi, rss]
+  rss_feeds:
+    - https://feeds.reuters.com/reuters/businessNews
+    - http://feeds.bbci.co.uk/news/business/rss.xml
+
+# ─── Claude ──────────────────────────────────────────────────────────────────
+
+claude:
+  model: claude-sonnet-4-5-20251001
+  use_claude_layer: true
+  use_verification_layer: true
+
+# ─── Telegram alerts ─────────────────────────────────────────────────────────
+
+telegram:
+  enabled: true
+  # bot_token: "your-bot-token"   # or set TELEGRAM_BOT_TOKEN env var
+  # chat_id: "your-chat-id"       # or set TELEGRAM_CHAT_ID env var
+
+# ─── Risk management ─────────────────────────────────────────────────────────
+# Position-level stop-loss. Checked at the start of every adaptive_check.
+
+risk:
+  # Close a position if it drops more than this % from the entry price we paid.
+  # Set to 0 to disable.
+  stop_loss_pct: 8.0
+
+  # Tighter stop for crypto — crypto moves 3-5x faster than equities.
+  crypto_stop_loss_pct: 5.0
+
+  # Minimum days to hold a position before the stop-loss fires.
+  # Prevents being stopped out by normal intraday volatility on day 1.
+  min_hold_days: 1
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+
+logging:
+  decisions: logs/decisions.log
+  predictions: logs/predictions.log
+  verification: logs/verification.log
