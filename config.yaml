@@ -76,7 +76,8 @@ news:
 # ─── Claude ──────────────────────────────────────────────────────────────────
 
 claude:
-  model: claude-sonnet-4-6
+  model: claude-sonnet-4-6            # Stage 1 + Stage 2 reasoning
+  verification_model: claude-opus-4-6 # Independent auditor — smarter, more skeptical
   use_claude_layer: true
   use_verification_layer: true
 

@@ -60,12 +60,15 @@ class VerificationLayer:
     def __init__(self, config: dict, momentum_strategy=None):
         self.config = config
         claude_cfg = config.get("claude", {})
-        self.model = claude_cfg.get("model", "claude-sonnet-4-0")
+        # Use a dedicated verification model if configured — ideally a different
+        # (more capable) model than the reasoning layer to avoid groupthink.
+        self.model = claude_cfg.get("verification_model") or claude_cfg.get("model", "claude-sonnet-4-6")
         self.enabled = claude_cfg.get("use_verification_layer", True)
         self.client = anthropic.Anthropic()
         self.momentum = momentum_strategy
         self.global_cfg = config.get("global", {})
         self.universe_cfg = config.get("universe", {})
+        print(f"[VERIFY] Auditor model: {self.model}")
 
     # ── Volatility flagging ───────────────────────────────
 

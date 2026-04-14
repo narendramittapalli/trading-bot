@@ -12,9 +12,31 @@ Also provides adaptive_check() for daily smart scheduling:
 import time
 from datetime import datetime, timezone
 
+from modules.earnings_check import apply_earnings_flags, get_earnings_flags
 from modules.momentum import is_crypto
-from modules.state_manager import StateManager
+from modules.performance_context import PerformanceContext
 from modules.risk_manager import RiskManager
+from modules.state_manager import StateManager
+
+# Sector lookup for concentration guard — covers the full instrument universe.
+# Instruments not listed here are treated as "other" (unconstrained).
+_SECTOR_MAP: dict[str, str] = {
+    # US Equities
+    "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
+    "META": "Technology", "GOOGL": "Technology", "AVGO": "Technology",
+    "TSLA": "Consumer Discretionary", "AMZN": "Consumer Discretionary",
+    "UNH": "Healthcare", "JPM": "Financials",
+    # Broad ETFs — tagged by dominant exposure
+    "SPY": "Broad Market", "QQQ": "Technology", "IWM": "Broad Market",
+    "VTI": "Broad Market", "ARKK": "Technology",
+    "XLK": "Technology", "XLE": "Energy", "XLF": "Financials",
+    # Commodities
+    "GLD": "Gold", "SLV": "Silver", "USO": "Oil", "PDBC": "Commodities",
+    # International
+    "EFA": "International", "EEM": "Emerging Markets",
+    "EWJ": "International", "EWA": "International", "INDA": "Emerging Markets",
+}
+_MAX_PER_SECTOR = 2  # Max instruments from the same sector in any single rebalance
 
 
 class Executor:
@@ -66,6 +88,17 @@ class Executor:
         """
         result = {"timestamp": datetime.now(timezone.utc).isoformat()}
 
+        # --- Inject performance context into Claude ---
+        try:
+            context = PerformanceContext.get(self.state)
+            self.claude.set_performance_context(context)
+            if context:
+                print("[CONTEXT] Performance track record loaded into Claude prompt.")
+            else:
+                print("[CONTEXT] No performance history yet — Claude reasoning without track record.")
+        except Exception as e:
+            print(f"[CONTEXT] Warning: could not load performance context: {e}")
+
         # --- Pre-trade snapshot ---
         try:
             pre_account = self.alpaca.get_account()
@@ -93,9 +126,9 @@ class Executor:
             return {"error": str(e), "stage": "class_momentum"}
 
         # --- Step 2: News ingestion ---
-        print("[STEP 2] Fetching news digest...")
+        print("[STEP 2] Fetching news digest (last 12h — rebalance window)...")
         try:
-            news_digest = self.news.get_headline_digest()
+            news_digest = self.news.get_headline_digest(max_age_hours=12)
             self.news.print_digest(news_digest)
             result["news_summary"] = {
                 "total": news_digest["total_fetched"],
@@ -107,6 +140,11 @@ class Executor:
 
         # --- Step 3: Claude Stage 1 — class allocation ---
         print("[STEP 3] Running Claude Stage 1 — class allocation...")
+
+        # Compute pure momentum baseline BEFORE asking Claude, so we can compare.
+        # This tells us whether news actually changed any class decision.
+        momentum_only_decisions = self.claude._default_class_response(class_rankings).get("decisions", {})
+
         try:
             class_assessment = self.claude.assess_classes(class_rankings, news_digest)
             self.claude.print_class_assessment(class_assessment)
@@ -122,6 +160,33 @@ class Executor:
             class_assessment = {"decisions": {}, "macro_summary": "", "fallback": True}
             for cr in class_rankings:
                 claude_decisions[cr["class_key"]] = {"decision": "ACTIVE", "reason": "Fallback — Claude unavailable."}
+
+        # Diff: which classes did news cause Claude to decide differently from pure momentum?
+        news_impact = {}
+        for cls_key, claude_info in claude_decisions.items():
+            mom_decision = momentum_only_decisions.get(cls_key, {}).get("decision", "ACTIVE")
+            claude_decision = claude_info.get("decision", "ACTIVE")
+            if claude_decision != mom_decision:
+                news_impact[cls_key] = {
+                    "momentum_only": mom_decision,
+                    "claude_with_news": claude_decision,
+                }
+        if news_impact:
+            print(f"  [NEWS IMPACT] News changed {len(news_impact)} class decision(s):")
+            for cls_key, diff in news_impact.items():
+                label = cls_key.replace("_", " ").title()
+                print(f"    {label}: {diff['momentum_only']} → {diff['claude_with_news']}")
+        else:
+            print("  [NEWS IMPACT] News did not change any class decisions today.")
+        result["news_impact"] = news_impact
+
+        # Accumulate token usage across all Claude calls for cost tracking
+        api_tokens = {
+            "stage1_in": class_assessment.get("input_tokens", 0),
+            "stage1_out": class_assessment.get("output_tokens", 0),
+            "stage2_in": 0, "stage2_out": 0,
+            "verify_in": 0, "verify_out": 0,
+        }
 
         # --- Step 3.5: Market regime check ---
         print("[STEP 3.5] Checking market regime (SPY momentum)...")
@@ -182,6 +247,8 @@ class Executor:
                     top_n=top_n,
                 )
                 self.claude.print_instrument_assessment(alloc["class_label"], stage2_result)
+                api_tokens["stage2_in"] += stage2_result.get("input_tokens", 0)
+                api_tokens["stage2_out"] += stage2_result.get("output_tokens", 0)
 
                 # Map Claude's selections to instrument details
                 selected_symbols = {s["symbol"] for s in stage2_result.get("selected", [])}
@@ -234,6 +301,62 @@ class Executor:
                     })
 
         self.allocator.print_instrument_selections(instrument_selections)
+
+        # --- Step 5.5: Earnings check ---
+        print("[STEP 5.5] Checking earnings calendar...")
+        try:
+            selected_symbols = [s["symbol"] for s in instrument_selections]
+            earnings_flags = get_earnings_flags(selected_symbols)
+            warn_count = sum(1 for f in earnings_flags.values() if f.get("level") == "WARN")
+            caution_count = sum(1 for f in earnings_flags.values() if f.get("level") == "CAUTION")
+            for flag in earnings_flags.values():
+                if flag.get("level") in ("WARN", "CAUTION"):
+                    print(f"  {flag['message']}")
+            if warn_count == 0 and caution_count == 0:
+                print("  All clear — no instruments reporting earnings within 7 days.")
+            instrument_selections = apply_earnings_flags(instrument_selections, earnings_flags)
+            result["earnings_flags"] = [
+                f for f in earnings_flags.values() if f.get("level") != "CLEAR"
+            ]
+        except Exception as e:
+            print(f"  [WARNING] Earnings check failed: {e}")
+            result["earnings_flags"] = []
+
+        # --- Step 5.6: Sector concentration guard ---
+        # Prevent holding more than _MAX_PER_SECTOR instruments from the same sector.
+        # When a sector is over-represented, the lowest-momentum instrument is dropped.
+        try:
+            sector_counts: dict[str, list[dict]] = {}
+            for sel in instrument_selections:
+                sector = _SECTOR_MAP.get(sel["symbol"], "other")
+                sector_counts.setdefault(sector, []).append(sel)
+
+            dropped = []
+            for sector, sels in sector_counts.items():
+                if sector in ("Broad Market", "other"):
+                    continue  # No cap on broad/uncategorised instruments
+                if len(sels) > _MAX_PER_SECTOR:
+                    # Sort by momentum descending, drop the weakest
+                    sels.sort(key=lambda x: x.get("momentum", 0), reverse=True)
+                    excess = sels[_MAX_PER_SECTOR:]
+                    for s in excess:
+                        dropped.append((s["symbol"], sector))
+                    instrument_selections = [
+                        s for s in instrument_selections
+                        if s["symbol"] not in {x["symbol"] for x in excess}
+                    ]
+
+            if dropped:
+                for sym, sector in dropped:
+                    print(f"  [SECTOR GUARD] Dropped {sym} ({sector}) — sector cap of {_MAX_PER_SECTOR} reached.")
+                result["sector_drops"] = [{"symbol": s, "sector": sec} for s, sec in dropped]
+            else:
+                print("  [SECTOR GUARD] No concentration issues.")
+                result["sector_drops"] = []
+        except Exception as e:
+            print(f"  [WARNING] Sector concentration check failed: {e}")
+            result["sector_drops"] = []
+
         result["instrument_selections"] = instrument_selections
 
         if not instrument_selections:
@@ -288,6 +411,8 @@ class Executor:
                 news_digest=news_digest,
                 capital=self.capital,
             )
+            api_tokens["verify_in"] = verification_result.get("input_tokens", 0)
+            api_tokens["verify_out"] = verification_result.get("output_tokens", 0)
             result["verification"] = {
                 "verdict": verification_result.get("verdict"),
                 "notes": verification_result.get("notes"),
@@ -304,6 +429,19 @@ class Executor:
                 "notes": str(e),
             }
             result["verification"] = verification_result
+
+        # --- API cost estimate ---
+        # Sonnet: $3/MTok in, $15/MTok out. Opus: $15/MTok in, $75/MTok out.
+        sonnet_in = (api_tokens["stage1_in"] + api_tokens["stage2_in"]) / 1_000_000 * 3.0
+        sonnet_out = (api_tokens["stage1_out"] + api_tokens["stage2_out"]) / 1_000_000 * 15.0
+        opus_in = api_tokens["verify_in"] / 1_000_000 * 15.0
+        opus_out = api_tokens["verify_out"] / 1_000_000 * 75.0
+        api_tokens["estimated_cost_usd"] = round(sonnet_in + sonnet_out + opus_in + opus_out, 5)
+        api_tokens["total_in"] = api_tokens["stage1_in"] + api_tokens["stage2_in"] + api_tokens["verify_in"]
+        api_tokens["total_out"] = api_tokens["stage1_out"] + api_tokens["stage2_out"] + api_tokens["verify_out"]
+        result["api_tokens"] = api_tokens
+        print(f"  [COST] This rebalance: ~${api_tokens['estimated_cost_usd']:.4f} "
+              f"({api_tokens['total_in']} in / {api_tokens['total_out']} out tokens)")
 
         # --- Step 9: Execute or Hold ---
         verdict = verification_result.get("verdict", "REJECTED")
@@ -331,15 +469,21 @@ class Executor:
 
         # --- Log predictions for tracking ---
         for sel in instrument_selections:
+            cls_key = sel["class_key"]
+            cls_news_impact = news_impact.get(cls_key)
             self.logger.log_prediction({
                 "symbol": sel["symbol"],
-                "class_key": sel["class_key"],
+                "class_key": cls_key,
                 "class_label": sel["class_label"],
                 "momentum_pct": sel.get("momentum_pct"),
                 "confidence": sel.get("confidence", "MEDIUM"),
                 "class_decision": sel.get("class_decision"),
                 "verification_verdict": verdict,
                 "action_taken": result["action"],
+                # News impact tracking — did news change this class's decision?
+                "news_changed_decision": cls_news_impact is not None,
+                "momentum_only_decision": cls_news_impact["momentum_only"] if cls_news_impact else sel.get("class_decision"),
+                "claude_with_news_decision": cls_news_impact["claude_with_news"] if cls_news_impact else sel.get("class_decision"),
             })
 
         # --- Email alert ---
@@ -674,6 +818,13 @@ class Executor:
         Called by the secondary scheduler job at 9:30 AM ET.
         """
         print("\n[PREFETCH] Running pre-market data collection...")
+
+        # Inject performance context so prefetch Claude call is also context-aware
+        try:
+            context = PerformanceContext.get(self.state)
+            self.claude.set_performance_context(context)
+        except Exception as e:
+            print(f"[CONTEXT] Warning: could not load performance context: {e}")
 
         class_rankings = self.allocator.compute_class_momentum()
         self.allocator.print_class_rankings(class_rankings)

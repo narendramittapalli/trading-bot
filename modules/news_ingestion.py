@@ -186,13 +186,24 @@ class NewsIngestion:
 
         return relevant
 
-    def get_headline_digest(self) -> dict:
+    def get_headline_digest(self, max_age_hours: int = None) -> dict:
         """
         Full pipeline: fetch, filter, and format a headline digest.
         Returns a dict with raw count, filtered count, and the digest text.
+
+        max_age_hours: if set, overrides config lookback_hours for this call.
+          - Prefetch (9:30 AM): use default 48h for broad context
+          - Rebalance (9:35 AM): pass 12 to get only overnight/morning news
         """
+        if max_age_hours is not None:
+            original = self.lookback_hours
+            self.lookback_hours = max_age_hours
+
         all_headlines = self.fetch_all()
         relevant = self.filter_relevant(all_headlines)
+
+        if max_age_hours is not None:
+            self.lookback_hours = original  # restore
 
         # Format digest for Claude
         digest_lines = []

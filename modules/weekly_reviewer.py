@@ -22,6 +22,8 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from modules.performance_context import PerformanceContext
+
 
 class WeeklyReviewer:
     """Reads logs and current positions to produce a weekly performance report."""
@@ -75,6 +77,12 @@ class WeeklyReviewer:
         # 6. Recent decision count (how active has the bot been?)
         recent_decisions = self._count_recent_decisions(days=7)
 
+        # 6b. News impact: how often did news change a decision, and did those changes help?
+        news_metrics = self._compute_news_impact(position_metrics)
+
+        # 6c. API cost this week
+        weekly_cost = self._compute_weekly_cost()
+
         # 7. Assemble record
         record = {
             "week_ending": week_ending,
@@ -88,6 +96,8 @@ class WeeklyReviewer:
             "confidence": confidence_metrics,
             "by_class": class_metrics,
             "decisions_this_week": recent_decisions,
+            "news_impact": news_metrics,
+            "api_cost_usd": weekly_cost,
         }
 
         # 8. Print report
@@ -97,7 +107,15 @@ class WeeklyReviewer:
         self.state.store_learning_record(record)
         self.logger.log_status("Weekly review complete.", {"week_ending": week_ending, "win_rate": record["overall_win_rate"]})
 
-        # 10. Telegram
+        # 10. Regenerate the performance context memo so Claude gets it on Monday
+        try:
+            memo = PerformanceContext.update(self.state)
+            print(f"\n  Performance context memo updated ({len(memo)} chars). "
+                  "Claude will use this on the next rebalance.")
+        except Exception as e:
+            print(f"  [WARNING] Could not update performance context: {e}")
+
+        # 11. Telegram
         if self.telegram:
             self._send_telegram(record)
 
@@ -245,6 +263,102 @@ class WeeklyReviewer:
             pass
         return "MEDIUM"
 
+    def _compute_news_impact(self, position_metrics: list[dict]) -> dict:
+        """
+        Read predictions.log and measure whether news-changed decisions led to
+        better or worse outcomes than what pure momentum would have chosen.
+
+        Returns a dict summarising:
+          - times_news_changed: how many class decisions news altered this week
+          - news_changed_avg_return: avg return of positions where news changed the class decision
+          - no_change_avg_return: avg return where news agreed with momentum
+          - verdict: 'helping' | 'hurting' | 'neutral' | 'insufficient data'
+        """
+        try:
+            if not os.path.exists(self.predictions_path):
+                return {"verdict": "no data"}
+
+            cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+            changed_returns: list[float] = []
+            unchanged_returns: list[float] = []
+
+            # Build a quick lookup of symbol → pct_return from this week's positions
+            return_lookup = {p["symbol"]: p["pct_return"] for p in position_metrics}
+
+            with open(self.predictions_path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        ts_str = entry.get("timestamp", "")
+                        if ts_str:
+                            ts = datetime.fromisoformat(ts_str).timestamp()
+                            if ts < cutoff:
+                                continue
+
+                        symbol = entry.get("symbol")
+                        if symbol not in return_lookup:
+                            continue
+
+                        ret = return_lookup[symbol]
+                        if entry.get("news_changed_decision"):
+                            changed_returns.append(ret)
+                        else:
+                            unchanged_returns.append(ret)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+            result: dict = {
+                "times_news_changed": len(changed_returns),
+                "news_changed_avg_return": (
+                    round(sum(changed_returns) / len(changed_returns), 2)
+                    if changed_returns else None
+                ),
+                "no_change_avg_return": (
+                    round(sum(unchanged_returns) / len(unchanged_returns), 2)
+                    if unchanged_returns else None
+                ),
+            }
+
+            # Verdict
+            if not changed_returns:
+                result["verdict"] = "no changes this week"
+            elif result["news_changed_avg_return"] is None or result["no_change_avg_return"] is None:
+                result["verdict"] = "insufficient data"
+            else:
+                diff = result["news_changed_avg_return"] - result["no_change_avg_return"]
+                if diff > 0.3:
+                    result["verdict"] = "helping"
+                elif diff < -0.3:
+                    result["verdict"] = "hurting"
+                else:
+                    result["verdict"] = "neutral"
+
+            return result
+
+        except Exception as e:
+            return {"verdict": f"error: {e}"}
+
+    def _compute_weekly_cost(self) -> float:
+        """Sum estimated API costs from decisions.log over the last 7 days."""
+        try:
+            if not os.path.exists(self.decisions_path):
+                return 0.0
+            cutoff = datetime.now(timezone.utc).timestamp() - 7 * 86400
+            total = 0.0
+            with open(self.decisions_path) as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+                        ts_str = entry.get("timestamp", "")
+                        if ts_str and datetime.fromisoformat(ts_str).timestamp() >= cutoff:
+                            tokens = entry.get("api_tokens", {})
+                            total += tokens.get("estimated_cost_usd", 0.0)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            return round(total, 5)
+        except Exception:
+            return 0.0
+
     def _count_recent_decisions(self, days: int = 7) -> int:
         """Count how many rebalance decisions were made in the last N days."""
         try:
@@ -285,6 +399,24 @@ class WeeklyReviewer:
         print(f"  Avg return  : {avg_ret:+.2f}%" if avg_ret is not None else "  Avg return  : N/A")
         print(f"  Decisions   : {record.get('decisions_this_week', 0)} rebalances this week")
 
+        news = record.get("news_impact", {})
+        verdict = news.get("verdict", "no data")
+        changed = news.get("times_news_changed", 0)
+        news_ret = news.get("news_changed_avg_return")
+        base_ret = news.get("no_change_avg_return")
+        if changed:
+            news_str = (
+                f"{changed} change(s) this week — "
+                f"avg return {news_ret:+.2f}% (vs {base_ret:+.2f}% no-change) — {verdict}"
+                if news_ret is not None and base_ret is not None
+                else f"{changed} change(s) — {verdict}"
+            )
+        else:
+            news_str = verdict
+        print(f"  News impact : {news_str}")
+        cost = record.get("api_cost_usd")
+        print(f"  Claude cost : ${cost:.4f} this week" if cost else "  Claude cost : N/A")
+
         positions = record.get("positions", [])
         if positions:
             print(f"\n  Open positions ({len(positions)}):")
@@ -320,12 +452,20 @@ class WeeklyReviewer:
             avg_ret = record.get("avg_return_pct")
             dd = record.get("drawdown_pct", 0)
 
+            news = record.get("news_impact", {})
+            news_line = (
+                f"News layer: {news['times_news_changed']} change(s) — {news.get('verdict', '?')}"
+                if news.get("times_news_changed", 0)
+                else "News layer: no decisions changed"
+            )
             lines = [
                 f"📊 *Weekly Review — {record['week_ending']}*",
                 f"Portfolio: ${pv:,.2f}" if pv else "Portfolio: N/A",
                 f"Win rate: {win_rate:.1f}%" if win_rate is not None else "Win rate: N/A",
                 f"Avg return: {avg_ret:+.2f}%" if avg_ret is not None else "Avg return: N/A",
                 f"Drawdown from peak: {dd:.1f}%",
+                news_line,
+                f"Claude cost: ${record.get('api_cost_usd', 0):.4f} this week",
             ]
 
             positions = record.get("positions", [])
