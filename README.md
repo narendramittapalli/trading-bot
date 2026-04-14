@@ -11,7 +11,7 @@ The bot has four layers:
 3. **News + Claude Reasoning** — Fetches financial headlines, sends them to Claude for macro assessment
 4. **Verification Layer** — Independent Claude call that audits the full decision before any trade executes
 
-Every Monday at 9:35 AM ET, the bot ranks the ETF universe by momentum, consults Claude on whether macro conditions support the signals, verifies the decision independently, and then either executes or holds.
+Every weekday (Mon–Fri) at 9:35 AM ET, the bot ranks the ETF universe by momentum, consults Claude on whether macro conditions support the signals, verifies the decision independently, and then either executes or holds.
 
 ## Prerequisites
 
