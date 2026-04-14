@@ -39,7 +39,7 @@ Every Monday at 9:35 AM ET, the bot ranks the ETF universe by momentum, consults
 
 1. Sign up at [https://console.anthropic.com](https://console.anthropic.com)
 2. Create an API key under **API Keys**
-3. The bot uses Claude Sonnet 4 by default — typical cost is ~$0.01-0.05 per rebalance cycle
+3. The bot uses `claude-sonnet-4-6` by default — typical cost is ~$0.01-0.05 per rebalance cycle
 
 ## Setup
 

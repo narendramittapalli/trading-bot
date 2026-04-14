@@ -76,7 +76,7 @@ news:
 # ─── Claude ──────────────────────────────────────────────────────────────────
 
 claude:
-  model: claude-sonnet-4-5-20251001
+  model: claude-sonnet-4-6
   use_claude_layer: true
   use_verification_layer: true
 
