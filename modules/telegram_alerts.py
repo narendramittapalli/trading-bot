@@ -86,6 +86,14 @@ class TelegramAlerts:
             chunks.append(current)
         return chunks
 
+    def send_message(self, text: str):
+        """
+        Generic message sender — used by the weekly reviewer, auto-tuner,
+        and parameter optimizer for notifications that don't fit the
+        structured rebalance/cash-hold templates.
+        """
+        self._send(text)
+
     def send_rebalance_alert(self, result: dict):
         """Send a two-level rebalance summary via Telegram."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

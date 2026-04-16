@@ -96,12 +96,13 @@ class NewsIngestion:
                 if resp.status_code == 200:
                     data = resp.json()
                     for article in data.get("articles", []):
+                        source_obj = article.get("source") or {}
                         headlines.append({
-                            "title": article.get("title", ""),
-                            "description": article.get("description", ""),
-                            "source": article.get("source", {}).get("name", "NewsAPI"),
-                            "published": article.get("publishedAt", ""),
-                            "url": article.get("url", ""),
+                            "title": article.get("title") or "",
+                            "description": article.get("description") or "",
+                            "source": source_obj.get("name") or "NewsAPI",
+                            "published": article.get("publishedAt") or "",
+                            "url": article.get("url") or "",
                             "origin": "newsapi",
                         })
                 else:
@@ -131,9 +132,9 @@ class NewsIngestion:
                         published = pub_dt.isoformat()
 
                     headlines.append({
-                        "title": entry.get("title", ""),
-                        "description": entry.get("summary", "")[:300],
-                        "source": feed_name,
+                        "title": entry.get("title") or "",
+                        "description": (entry.get("summary") or "")[:300],
+                        "source": feed_name or feed_url,
                         "published": published,
                         "url": entry.get("link", ""),
                         "origin": "rss",
@@ -208,9 +209,9 @@ class NewsIngestion:
         # Format digest for Claude
         digest_lines = []
         for i, h in enumerate(relevant[:30], 1):  # Cap at 30 headlines
-            source = h.get("source", "Unknown")
-            title = h.get("title", "No title")
-            desc = h.get("description", "")[:150]
+            source = h.get("source") or "Unknown"
+            title = h.get("title") or "No title"
+            desc = (h.get("description") or "")[:150]
             symbols = ", ".join(h.get("matched_symbols", []))
             keywords = ", ".join(h.get("matched_keywords", []))
 
