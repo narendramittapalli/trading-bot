@@ -71,9 +71,41 @@ class ClaudeReasoning:
     def __init__(self, config: dict):
         self.config = config
         claude_cfg = config.get("claude", {})
-        self.model = claude_cfg.get("model", "claude-sonnet-4-0")
+        self.model = claude_cfg.get("model", "claude-sonnet-4-6")
         self.enabled = claude_cfg.get("use_claude_layer", True)
         self.client = anthropic.Anthropic()
+        self._performance_context: str = ""  # Injected before each rebalance
+
+    def set_performance_context(self, context: str):
+        """
+        Set the performance memo to be injected into all Claude prompts.
+        Called by the Executor before each rebalance cycle using data from
+        PerformanceContext.get(state_manager).
+        """
+        self._performance_context = context or ""
+
+    def _build_stage1_system(self) -> str:
+        """Build the Stage 1 system prompt, appending performance context if available."""
+        base = STAGE1_SYSTEM_PROMPT
+        if self._performance_context:
+            base += (
+                f"\n\n{self._performance_context}\n\n"
+                "Apply this track record when making today's decisions: favour classes that "
+                "have been contributing positively, be cautious about classes that have been "
+                "underperforming, and adjust your confidence calibration if the warning above applies."
+            )
+        return base
+
+    def _build_stage2_system(self) -> str:
+        """Build the Stage 2 system prompt, appending performance context if available."""
+        base = STAGE2_SYSTEM_PROMPT
+        if self._performance_context:
+            base += (
+                f"\n\n{self._performance_context}\n\n"
+                "Use the confidence calibration data above when assigning HIGH/MEDIUM/LOW. "
+                "If the calibration warning is present, be more conservative with HIGH ratings."
+            )
+        return base
 
     # ── JSON parsing helper ───────────────────────────────
 
@@ -121,7 +153,7 @@ class ClaudeReasoning:
                 model=self.model,
                 max_tokens=2048,
                 temperature=0,
-                system=STAGE1_SYSTEM_PROMPT,
+                system=self._build_stage1_system(),
                 messages=[{"role": "user", "content": user_message}],
             )
 
@@ -205,7 +237,7 @@ class ClaudeReasoning:
                 model=self.model,
                 max_tokens=1024,
                 temperature=0,
-                system=STAGE2_SYSTEM_PROMPT,
+                system=self._build_stage2_system(),
                 messages=[{"role": "user", "content": user_message}],
             )
 

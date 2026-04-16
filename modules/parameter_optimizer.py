@@ -38,9 +38,13 @@ from itertools import product
 # ── Parameter search space ────────────────────────────────────────────────────
 
 SEARCH_SPACE = {
-    "lookback_days":          [10, 15, 20, 25, 30],
-    "top_n":                  [1, 2, 3],
-    "min_class_momentum_pct": [0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
+    "lookback_days":              [10, 15, 20, 25, 30],
+    "top_n":                      [1, 2, 3],
+    "min_class_momentum_pct":     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0],
+    # How negative SPY must go before the regime filter kicks in (forces REDUCE/SKIP).
+    # More negative = permissive (lets the bot trade through mild dips).
+    # Less negative = defensive (exits early, more cash during downturns).
+    "market_regime_threshold_pct": [-1.0, -1.5, -2.0, -2.5, -3.0],
 }
 
 # Minimum improvement in Sharpe ratio required to recommend a param change.
@@ -104,6 +108,7 @@ class ParameterOptimizer:
             "lookback_days": self.config.get("global", {}).get("lookback_days", 20),
             "top_n": self.config.get("universe", {}).get("us_equities", {}).get("top_n", 2),
             "min_class_momentum_pct": self.config.get("global", {}).get("min_class_momentum_pct", 1.5),
+            "market_regime_threshold_pct": self.config.get("global", {}).get("market_regime_threshold_pct", -2.0),
         }
         current_sharpe = self._simulate(prices, current_params)
         print(f"\n  Current params : {current_params}")
@@ -175,19 +180,37 @@ class ParameterOptimizer:
         lookback = params["lookback_days"]
         top_n = params["top_n"]
         min_mom = params["min_class_momentum_pct"] / 100.0
+        regime_threshold = params.get("market_regime_threshold_pct", -2.0) / 100.0
         rebalance_freq = 5  # Weekly (5 trading days)
 
         # Align price series lengths
         min_len = min(len(v) for v in prices.values())
         aligned = {sym: v[-min_len:] for sym, v in prices.items()}
+        spy_closes = aligned.get("SPY", [])
 
         portfolio_returns = []
 
         i = lookback
         while i + rebalance_freq < min_len:
-            # Compute momentum for each symbol
+            # ── Regime filter: check SPY momentum ────────
+            # Full cash if SPY < 2x threshold (severe downturn)
+            # Halved exposure if SPY < threshold (mild downturn)
+            regime_scale = 1.0
+            if len(spy_closes) > i and spy_closes[i - lookback] > 0:
+                spy_mom = (spy_closes[i] - spy_closes[i - lookback]) / spy_closes[i - lookback]
+                if spy_mom < regime_threshold * 2:
+                    # Full cash — sit out severe downturns
+                    portfolio_returns.append(0.0)
+                    i += rebalance_freq
+                    continue
+                elif spy_mom < regime_threshold:
+                    regime_scale = 0.5  # Halved exposure during mild downturns
+
+            # ── Momentum ranking ──────────────────────────
             momentums = {}
             for sym, closes in aligned.items():
+                if sym == "SPY":
+                    continue  # SPY is regime proxy only, not a position
                 start = closes[i - lookback]
                 end = closes[i]
                 if start > 0:
@@ -203,7 +226,7 @@ class ParameterOptimizer:
             # Pick top_n by momentum
             selected = sorted(momentums, key=momentums.get, reverse=True)[:top_n]
 
-            # Equal-weight return over next rebalance period
+            # Equal-weight return over next rebalance period (scaled by regime)
             period_return = 0.0
             valid = 0
             for sym in selected:
@@ -215,7 +238,7 @@ class ParameterOptimizer:
                     valid += 1
 
             if valid > 0:
-                portfolio_returns.append(period_return / valid)
+                portfolio_returns.append((period_return / valid) * regime_scale)
             else:
                 portfolio_returns.append(0.0)
 

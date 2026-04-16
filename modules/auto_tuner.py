@@ -32,6 +32,7 @@ SAFE_PARAMS = {
     "lookback_days",
     "top_n",
     "min_class_momentum_pct",
+    "market_regime_threshold_pct",   # How negative SPY must go to trigger regime filter
 }
 
 # Params that must NEVER be auto-changed, regardless of any recommendation
@@ -123,8 +124,8 @@ class AutoTuner:
             else:
                 new_str = str(new_val)
 
-            # Replace the param value in YAML (handles both int and float)
-            pattern = rf"(\b{re.escape(param)}:\s*)\d+(\.\d+)?"
+            # Replace the param value in YAML (handles int, float, and negative float)
+            pattern = rf"(\b{re.escape(param)}:\s*)-?\d+(\.\d+)?"
             new_config_text = re.sub(pattern, f"{param}: {new_str}", config_text)
 
             if new_config_text != config_text:
@@ -174,7 +175,7 @@ class AutoTuner:
             param = change["param"]
             old_val = change["old"]
             new_str = str(old_val)
-            pattern = rf"(\b{re.escape(param)}:\s*)\d+(\.\d+)?"
+            pattern = rf"(\b{re.escape(param)}:\s*)-?\d+(\.\d+)?"
             new_config_text = re.sub(pattern, f"{param}: {new_str}", config_text)
             if new_config_text != config_text:
                 config_text = new_config_text
