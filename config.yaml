@@ -68,10 +68,31 @@ adaptive:
 
 news:
   lookback_hours: 48
-  sources: [newsapi, rss]
+  sources: [newsapi, rss, grok]   # 'grok' pulls real-time X posts via xAI API
   rss_feeds:
     - https://feeds.reuters.com/reuters/businessNews
     - http://feeds.bbci.co.uk/news/business/rss.xml
+
+# ─── Grok X sentiment ────────────────────────────────────────────────────────
+# Uses xAI's Grok API with the x_search server-side tool to fetch real-time
+# X posts from market-moving accounts before each rebalance.
+# Requires: XAI_API_KEY environment variable (get one at https://x.ai/api)
+# Cost: ~$0.000X per daily call using grok-3-mini (essentially free)
+
+grok:
+  enabled: true
+  model: grok-4-1-fast-non-reasoning   # Cheapest available — sufficient for summarising X posts
+  lookback_hours: 24              # How far back to search (matches overnight window)
+  watchlist:
+    - realDonaldTrump             # Tariff/trade policy signals
+    - elonmusk                    # Tesla, SpaceX, DOGE, market sentiment
+    - sundarpichai                # Google / Alphabet signals
+    - satyanadella                # Microsoft / AI signals
+    - tim_cook                    # Apple signals
+    - federalreserve              # Fed communications
+    - GoldmanSachs                # Institutional macro views
+    - elerianm                    # Mohamed El-Erian — respected macro economist
+    - nouriel                     # Nouriel Roubini — macro/risk signals
 
 # ─── Claude ──────────────────────────────────────────────────────────────────
 
@@ -102,6 +123,21 @@ risk:
   # Minimum days to hold a position before the stop-loss fires.
   # Prevents being stopped out by normal intraday volatility on day 1.
   min_hold_days: 1
+
+# ─── Live-readiness evaluation ───────────────────────────────────────────────
+# Evaluated automatically every Friday after the weekly review.
+# Run on-demand with: python main.py check-readiness
+
+live_readiness:
+  min_days_paper: 30       # Must have at least this many days of paper trading
+  min_weeks_data: 4        # Must have at least this many weekly review records
+  win_rate_pct: 60.0       # Average position win rate must reach this %
+  avg_return_pct: 0.20     # Average return per rebalance cycle must reach this %
+  max_drawdown_pct: 5.0    # Peak drawdown must never have exceeded this %
+  consistency_weeks: 4     # Must be profitable in ≥ N of the last 6 weekly reviews
+  worst_week_pct: -3.0     # No single week should be worse than this %
+  notify_on_ready: true    # Send Telegram alert when verdict first flips to READY
+  notify_weekly: true      # Include readiness report in the Friday Telegram message
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 

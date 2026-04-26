@@ -273,6 +273,26 @@ class Executor:
                 if not chosen:
                     chosen = valid_instruments[:top_n]
 
+            # In REDUCE mode, skip instruments Claude flagged as LOW confidence.
+            # REDUCE means we're already uncertain about this class — doubling down on
+            # a LOW confidence pick compounds that uncertainty for minimal reward.
+            if alloc["decision"] == "REDUCE" and claude_notes:
+                pre_filter = len(chosen)
+                chosen = [
+                    inst for inst in chosen
+                    if claude_notes.get(inst["symbol"], {}).get("confidence", "MEDIUM") != "LOW"
+                ]
+                dropped = pre_filter - len(chosen)
+                if dropped:
+                    dropped_syms = [
+                        inst["symbol"] for inst in valid_instruments[:pre_filter]
+                        if claude_notes.get(inst["symbol"], {}).get("confidence") == "LOW"
+                    ]
+                    print(
+                        f"  [CONF FILTER] REDUCE mode: dropped {dropped} LOW-confidence "
+                        f"instrument(s) in {alloc['class_label']}: {dropped_syms}"
+                    )
+
             # Compute per-instrument capital allocation
             class_capital = alloc["allocated_capital"]
             max_instrument_capital = self.capital * self.allocator.max_single_instrument
@@ -533,6 +553,14 @@ class Executor:
                 msg = f"Reconciliation: expected but missing positions: {sorted(missing)}"
                 self.logger.log_error(msg)
                 issues.append({"type": "missing", "symbols": sorted(missing)})
+                # Alert immediately — a missing position means an order silently failed.
+                if self.telegram:
+                    self.telegram.send_message(
+                        f"⚠️ <b>RECONCILIATION ALERT</b>\n"
+                        f"Orders placed but positions NOT found in Alpaca:\n"
+                        f"<b>{', '.join(sorted(missing))}</b>\n\n"
+                        f"These fills may have failed silently. Check Alpaca dashboard."
+                    )
 
             if unexpected:
                 msg = f"Reconciliation: unexpected open positions: {sorted(unexpected)}"

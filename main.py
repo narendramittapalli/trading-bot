@@ -49,6 +49,7 @@ from modules.state_manager import StateManager
 from modules.weekly_reviewer import WeeklyReviewer
 from modules.parameter_optimizer import ParameterOptimizer
 from modules.auto_tuner import AutoTuner
+from modules.live_readiness import LiveReadinessEvaluator
 
 
 # ─────────────────────────────────────────────────────
@@ -485,6 +486,28 @@ def cmd_restore_params(config: dict):
         print("Nothing to restore — no previous parameter history found.")
 
 
+def cmd_check_readiness(config: dict):
+    """
+    Evaluate whether the bot is ready to trade with real money.
+
+    Reads the weekly review history from state.db and scores 7 criteria:
+      run time, win rate, avg return, max drawdown, consistency,
+      confidence calibration, and stability.
+
+    Sends the report to Telegram and prints it to the console.
+    """
+    components = build_components(config)
+    state = components["executor"].state
+    telegram = components["telegram"]
+
+    evaluator = LiveReadinessEvaluator(
+        config=config,
+        state_manager=state,
+        telegram=telegram,
+    )
+    evaluator.evaluate()
+
+
 def cmd_deposit(config: dict):
     """
     Record a monthly petty cash deposit and update the bot's capital.
@@ -562,6 +585,7 @@ COMMANDS = {
     "review": cmd_review,
     "optimize": cmd_optimize,
     "restore_params": cmd_restore_params,
+    "check-readiness": cmd_check_readiness,
 }
 
 
@@ -582,6 +606,7 @@ def main():
         print("  review            Run the weekly performance review now")
         print("  optimize          Run monthly parameter sweep + auto-tune now")
         print("  restore_params    Undo last auto-tune (revert config.yaml params)")
+        print("  check-readiness   Evaluate whether the bot is ready for real money")
         print()
         print("Examples:")
         print("  python main.py run")

@@ -50,7 +50,7 @@ def _flatten_universe(config: dict) -> list[str]:
 
 
 class NewsIngestion:
-    """Fetches and filters financial headlines from NewsAPI and RSS feeds."""
+    """Fetches and filters financial headlines from NewsAPI, RSS feeds, and Grok/X."""
 
     def __init__(self, config: dict):
         self.config = config
@@ -60,6 +60,14 @@ class NewsIngestion:
         self.rss_feeds = news_cfg.get("rss_feeds", [])
         self.universe = _flatten_universe(config)
         self.newsapi_key = os.environ.get("NEWSAPI_KEY", "")
+
+        # Grok / X sentiment config
+        grok_cfg = config.get("grok", {})
+        self.grok_enabled = grok_cfg.get("enabled", False) and "grok" in self.sources
+        self.grok_model = grok_cfg.get("model", "grok-3-mini")
+        self.grok_lookback_hours = grok_cfg.get("lookback_hours", 24)
+        self.grok_watchlist: list[str] = grok_cfg.get("watchlist", [])
+        self.grok_api_key = os.environ.get("XAI_API_KEY", "")
 
     def fetch_newsapi(self) -> list[dict]:
         """Fetch headlines from NewsAPI free tier."""
@@ -144,8 +152,107 @@ class NewsIngestion:
 
         return headlines
 
-    def fetch_all(self) -> list[dict]:
-        """Fetch headlines from all configured sources."""
+    def fetch_grok_x_sentiment(self, max_age_hours: int | None = None) -> list[dict]:
+        """
+        Use Grok with xAI's x_search server-side tool to pull real-time X posts
+        from market-moving accounts (config: grok.watchlist).
+
+        Returns a list with a single synthetic headline dict whose title/description
+        contains Grok's synthesised summary — compatible with the rest of the pipeline.
+
+        Requires: XAI_API_KEY environment variable.
+        Docs: https://docs.x.ai/docs/guides/tools/search-tools
+        """
+        if not self.grok_enabled:
+            return []
+        if not self.grok_api_key:
+            print("[GROK] Warning: XAI_API_KEY not set. Skipping Grok X sentiment.")
+            return []
+        if not self.grok_watchlist:
+            print("[GROK] Warning: grok.watchlist is empty in config. Skipping.")
+            return []
+
+        hours = max_age_hours or self.grok_lookback_hours
+        from_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+        to_dt = datetime.now(timezone.utc)
+
+        watchlist_str = ", ".join(f"@{h}" for h in self.grok_watchlist)
+        prompt = (
+            f"Search X for posts from {watchlist_str} posted in the last {hours} hours. "
+            f"Summarise ONLY posts relevant to: financial markets, stocks, crypto, "
+            f"interest rates, tariffs, trade policy, or the economy. "
+            f"Ignore personal posts, sports, entertainment, or unrelated topics. "
+            f"If nothing market-relevant was posted, say 'No market-relevant posts found.' "
+            f"Keep your answer concise — 3 to 6 sentences max."
+        )
+
+        # xAI's API is OpenAI-compatible. x_search is a server-side tool — declare it
+        # in the tools array and xAI resolves it before returning the final response.
+        # Tool format: https://docs.x.ai/developers/tools/x-search
+        payload = {
+            "model": self.grok_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [
+                {
+                    "type": "x_search",
+                    "x_search": {
+                        "from_date": from_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "to_date": to_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    },
+                }
+            ],
+            "max_tokens": 600,
+            "temperature": 0,
+        }
+
+        try:
+            resp = requests.post(
+                "https://api.x.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.grok_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+
+            if resp.status_code != 200:
+                print(f"[GROK] API error {resp.status_code}: {resp.text[:300]}")
+                return []
+
+            data = resp.json()
+            content = (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                or ""
+            ).strip()
+
+            if not content or "no market-relevant posts" in content.lower():
+                print(f"[GROK] No market-relevant X posts found in last {hours}h.")
+                return []
+
+            print(f"[GROK] X sentiment summary ({hours}h): {content[:120]}...")
+
+            # Wrap as a synthetic headline so it flows through filter_relevant normally.
+            # Mark all macro keywords as matched so it always reaches Claude's prompt.
+            return [{
+                "title": f"[X / Grok Sentiment — last {hours}h] {content[:120]}",
+                "description": content,
+                "source": "Grok / X",
+                "published": to_dt.isoformat(),
+                "url": "https://x.ai",
+                "origin": "grok",
+                "matched_symbols": self.universe,   # treat as relevant to all instruments
+                "matched_keywords": ["markets", "sentiment", "x posts"],
+            }]
+
+        except Exception as e:
+            print(f"[GROK] Request failed: {e}")
+            return []
+
+    def fetch_all(self, max_age_hours: int | None = None) -> list[dict]:
+        """Fetch headlines from all configured sources (NewsAPI, RSS, Grok/X)."""
         all_headlines = []
 
         if "newsapi" in self.sources:
@@ -153,6 +260,9 @@ class NewsIngestion:
 
         if "rss" in self.sources:
             all_headlines.extend(self.fetch_rss())
+
+        if "grok" in self.sources:
+            all_headlines.extend(self.fetch_grok_x_sentiment(max_age_hours=max_age_hours))
 
         # Deduplicate by title (case-insensitive)
         seen = set()
@@ -200,7 +310,7 @@ class NewsIngestion:
             original = self.lookback_hours
             self.lookback_hours = max_age_hours
 
-        all_headlines = self.fetch_all()
+        all_headlines = self.fetch_all(max_age_hours=max_age_hours)
         relevant = self.filter_relevant(all_headlines)
 
         if max_age_hours is not None:

@@ -22,7 +22,21 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
+from modules.live_readiness import LiveReadinessEvaluator
 from modules.performance_context import PerformanceContext
+
+
+def _fmt_cost(cost: float | None) -> str:
+    """Format API cost with enough precision to always show a non-zero value."""
+    if cost is None:
+        return "N/A"
+    if cost == 0:
+        return "$0.00"
+    if cost < 0.001:
+        return f"${cost:.6f}"   # e.g. $0.000042
+    if cost < 0.01:
+        return f"${cost:.5f}"   # e.g. $0.00421
+    return f"${cost:.4f}"       # e.g. $0.0421
 
 
 class WeeklyReviewer:
@@ -115,9 +129,20 @@ class WeeklyReviewer:
         except Exception as e:
             print(f"  [WARNING] Could not update performance context: {e}")
 
-        # 11. Telegram
+        # 11. Telegram weekly summary
         if self.telegram:
             self._send_telegram(record)
+
+        # 12. Live-readiness check — runs every Friday, notifies via Telegram
+        try:
+            readiness = LiveReadinessEvaluator(
+                config=self.config,
+                state_manager=self.state,
+                telegram=self.telegram,
+            )
+            readiness.evaluate()
+        except Exception as e:
+            print(f"  [WARNING] Live-readiness check failed: {e}")
 
         return record
 
@@ -415,7 +440,7 @@ class WeeklyReviewer:
             news_str = verdict
         print(f"  News impact : {news_str}")
         cost = record.get("api_cost_usd")
-        print(f"  Claude cost : ${cost:.4f} this week" if cost else "  Claude cost : N/A")
+        print(f"  Claude cost : {_fmt_cost(cost)} this week" if cost is not None else "  Claude cost : N/A")
 
         positions = record.get("positions", [])
         if positions:
@@ -465,7 +490,7 @@ class WeeklyReviewer:
                 f"Avg return: {avg_ret:+.2f}%" if avg_ret is not None else "Avg return: N/A",
                 f"Drawdown from peak: {dd:.1f}%",
                 news_line,
-                f"Claude cost: ${record.get('api_cost_usd', 0):.4f} this week",
+                f"Claude cost: {_fmt_cost(record.get('api_cost_usd', 0))} this week",
             ]
 
             positions = record.get("positions", [])
